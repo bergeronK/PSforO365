@@ -216,8 +216,9 @@ function Import-TargetGroup
 		[System.Management.Automation.PSCredential] $Credential
 	)
 
+	$GroupSamAccountName = $GroupDef.GroupSamAccountName
 	$FindSplat = New-ADParamSplat -Server $Server -Credential $Credential -Additional @{
-		Filter      = "SamAccountName -eq '$($GroupDef.GroupSamAccountName)'"
+		Filter      = { SamAccountName -eq $GroupSamAccountName }
 		Properties  = @('Description')
 		ErrorAction = 'Stop'
 	}
@@ -292,7 +293,7 @@ function Set-TargetGroupManager
 	)
 
 	$FindSplat = New-ADParamSplat -Server $Server -Credential $Credential -Additional @{
-		Filter      = "SamAccountName -eq '$ManagerSamAccountName'"
+		Filter      = { SamAccountName -eq $ManagerSamAccountName }
 		ErrorAction = 'SilentlyContinue'
 	}
 	$Manager = Get-ADObject @FindSplat
@@ -315,6 +316,29 @@ function Set-TargetGroupManager
 }
 
 #---------------------------------------------------
+# Returns whether the given member DN is already in the
+# group's membership. Used to classify an Add-ADGroupMember
+# failure without depending on the (localized) error text.
+#---------------------------------------------------
+function Test-ADGroupContainsMember
+{
+	param (
+		[Parameter(Mandatory=$true)] [string] $GroupDN,
+		[Parameter(Mandatory=$true)] [string] $MemberDN,
+		[string] $Server,
+		[System.Management.Automation.PSCredential] $Credential
+	)
+
+	$Splat = New-ADParamSplat -Server $Server -Credential $Credential -Additional @{
+		Identity    = $GroupDN
+		Properties  = 'member'
+		ErrorAction = 'SilentlyContinue'
+	}
+	$Group = Get-ADGroup @Splat
+	return ([bool]$Group -and ($Group.member -contains $MemberDN))
+}
+
+#---------------------------------------------------
 # Resolves a member by SamAccountName in the target forest
 # and adds it to the given group. Tracks stats and returns
 # whether the member is (now) in the group.
@@ -331,7 +355,7 @@ function Add-TargetGroupMember
 	)
 
 	$FindSplat = New-ADParamSplat -Server $Server -Credential $Credential -Additional @{
-		Filter      = "SamAccountName -eq '$MemberSamAccountName'"
+		Filter      = { SamAccountName -eq $MemberSamAccountName }
 		ErrorAction = 'SilentlyContinue'
 	}
 	$TargetMember = Get-ADObject @FindSplat
@@ -357,7 +381,9 @@ function Add-TargetGroupMember
 	}
 	catch
 	{
-		if ($_.Exception.Message -match 'already a member')
+		# Classify the failure without parsing the (localized) error text: if the
+		# member is in fact already in the group, treat it as already-present.
+		if (Test-ADGroupContainsMember -GroupDN $GroupDN -MemberDN $TargetMember.DistinguishedName -Server $Server -Credential $Credential)
 		{
 			$Stats.MembersAlreadyPresent++
 			return $true
